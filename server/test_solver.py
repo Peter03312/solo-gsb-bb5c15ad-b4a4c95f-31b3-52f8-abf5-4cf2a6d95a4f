@@ -157,7 +157,8 @@ def main():
     def check_top(rows, cols, k, grid, locks, ones_range, label, limit=3):
         expected = brute_force_top(rows, cols, k, grid, locks,
                                    ones_range, limit)
-        got = solve_repair_top(rows, cols, k, grid, locks, ones_range, limit)
+        got = solve_repair_top(rows, cols, k, grid, locks, ones_range,
+                               limit=limit)
         if expected is None:
             assert got is None, f"{label}: 应无解但解出 {got}"
             print(f"  [OK] {label}: 无可行修补（与暴力一致）")
@@ -231,7 +232,7 @@ def main():
         locks = [[r, c] for r in range(rows) for c in range(cols)
                  if trng.random() < 0.2]
         a = solve_repair(rows, cols, k, grid, locks)
-        b = solve_repair_top(rows, cols, k, grid, locks, None, 1)
+        b = solve_repair_top(rows, cols, k, grid, locks, None, limit=1)
         if a is None:
             assert b is None
         else:

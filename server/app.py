@@ -44,25 +44,27 @@ def get_state():
 @app.post("/api/preview")
 def preview():
     try:
-        rows, cols, grid, locks, k, ones_range = validate_design(
-            request.get_json(silent=True))
+        (rows, cols, grid, locks, k,
+         ones_range, repeat) = validate_design(request.get_json(silent=True))
     except ValidationError as exc:
         return jsonify({"error": str(exc)}), 400
 
-    input_obj = canonical(rows, cols, grid, locks, k, ones_range)
+    input_obj = canonical(rows, cols, grid, locks, k, ones_range, repeat)
     input_text = _canonical_text(input_obj)
     violations = find_violations(grid, rows, cols, k)
     solved = solve_repair_top(rows, cols, k, grid, locks, ones_range,
-                              limit=MAX_CANDIDATES)
+                              repeat, limit=MAX_CANDIDATES)
 
     if solved is None:
-        # 无可行修补（含格值1总数区间不可达）：保留原稿，仅报无解（不发放令牌）
+        # 无可行修补（含格值1总数区间不可达、周期与锁定冲突）：
+        # 保留原稿，仅报无解（不发放令牌）
         return jsonify({
             "solvable": False,
             "violations": violations,
             "input": input_obj,
             "onesCount": sum(v for row in grid for v in row),
             "onesRange": input_obj["onesRange"],
+            "repeat": input_obj["repeat"],
         })
 
     candidates = solved["candidates"]
@@ -86,6 +88,7 @@ def preview():
         "onesCount": sum(v for row in grid for v in row),
         "repairedOnesCount": first["onesCount"],
         "onesRange": input_obj["onesRange"],
+        "repeat": input_obj["repeat"],
         # 前 3 个同样最优、互不相同的候选（不足 3 个按实际数量返回），
         # 按行展开格值字典序升序；确认时用 candidate 序号选择
         "candidateCount": len(candidates),
@@ -96,33 +99,36 @@ def preview():
 @app.post("/api/diagnose")
 def diagnose():
     # 只读诊断：不落库、不发放令牌、不改变原稿/草稿/版本；
-    # 入参与 /api/preview 完全一致（尺寸、格值、锁定、K、可选 onesRange）。
+    # 入参与 /api/preview 完全一致（尺寸、格值、锁定、K、
+    # 可选 onesRange、可选 repeat）。
     try:
-        rows, cols, grid, locks, k, ones_range = validate_design(
-            request.get_json(silent=True))
+        (rows, cols, grid, locks, k,
+         ones_range, repeat) = validate_design(request.get_json(silent=True))
     except ValidationError as exc:
         return jsonify({"error": str(exc)}), 400
 
-    input_obj = canonical(rows, cols, grid, locks, k, ones_range)
+    input_obj = canonical(rows, cols, grid, locks, k, ones_range, repeat)
     violations = find_violations(grid, rows, cols, k)
     ones_count = sum(v for row in grid for v in row)
     diagnosis = diagnose_unlocks(rows, cols, k, grid, locks, ones_range,
-                                 limit=MAX_CANDIDATES)
+                                 repeat, limit=MAX_CANDIDATES)
 
     base = {
         "violations": violations,
         "input": input_obj,
         "onesCount": ones_count,
         "onesRange": input_obj["onesRange"],
+        "repeat": input_obj["repeat"],
     }
     if diagnosis["structural"]:
         # 全部锁定格解除仍无解：结构性无解，明确报告且不给误导性解锁建议
         return jsonify({
             **base,
             "structurallyUnsolvable": True,
-            "message": "即使解除全部锁定格，在当前尺寸、格值、K"
-                       "与格值1总数区间下仍不存在达标稿件，属于结构性无解；"
-                       "请调整尺寸、格值、K 或格值1总数区间，而非解除锁定。",
+            "message": "即使解除全部锁定格，在当前尺寸、格值、K、"
+                       "格值1总数区间与重复周期下仍不存在达标稿件，"
+                       "属于结构性无解；请调整尺寸、格值、K、"
+                       "格值1总数区间或重复周期，而非解除锁定。",
         })
     return jsonify({
         **base,
@@ -155,14 +161,16 @@ def confirm():
         return jsonify({"error": "候选方案序号必须是非负整数"}), 400
 
     try:
-        rows, cols, grid, locks, k, ones_range = validate_design(body)
+        (rows, cols, grid, locks, k,
+         ones_range, repeat) = validate_design(body)
     except ValidationError as exc:
         return jsonify({"error": str(exc)}), 400
 
-    # 原子确认：令牌未消费、草稿与预览输入一致（含格值1区间）、预览绑定的
-    # 原稿版本未变、候选序号属于该预览，四者同时成立才覆盖原稿（版本仅 +1、
-    # 区间随原稿持久化）并消费令牌；否则整体回滚。
-    input_text = _canonical_text(canonical(rows, cols, grid, locks, k, ones_range))
+    # 原子确认：令牌未消费、草稿与预览输入一致（含格值1区间与重复周期）、
+    # 预览绑定的原稿版本未变、候选序号属于该预览，四者同时成立才覆盖原稿
+    # （版本仅 +1、区间与周期随原稿持久化）并消费令牌；否则整体回滚。
+    input_text = _canonical_text(
+        canonical(rows, cols, grid, locks, k, ones_range, repeat))
     design, reason = db.commit_preview(token, input_text, candidate_index)
     if design is None:
         message = {

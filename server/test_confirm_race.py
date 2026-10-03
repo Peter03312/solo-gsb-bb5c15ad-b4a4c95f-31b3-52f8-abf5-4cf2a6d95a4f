@@ -370,7 +370,7 @@ import json as _json
 legacy_token = _uuid.uuid4().hex
 legacy_input = _json.dumps(
     {"rows": TIE2["rows"], "cols": TIE2["cols"], "grid": TIE2["grid"],
-     "locks": [], "k": TIE2["k"], "onesRange": None},
+     "locks": [], "k": TIE2["k"], "onesRange": None, "repeat": None},
     sort_keys=True, separators=(",", ":"))
 legacy_result = {"repaired": c0["repaired"], "flips": c0["flips"],
                  "flipCount": 2}

@@ -19,7 +19,41 @@ def _var(r, c, cols):
     return r * cols + c + 1
 
 
-def build_hard_clauses(rows, cols, k, grid, locks):
+def _repeat_clauses(rows, cols, repeat):
+    """重复周期硬约束：修补稿按行周期、列周期重复（索引环绕）。
+
+    repeat 为 (行周期, 列周期) 或 None（不限制）。对每格及其按行周期
+    下移、列周期右移后的格值分别相等（x_r,c ⇔ x_r+p,c 与 x_r,c ⇔ x_r,c+q，
+    模行列数环绕），以一对二元子句表达等价。
+    """
+    if repeat is None:
+        return []
+    row_period, col_period = repeat
+    clauses = []
+    seen = set()
+
+    def equal(a, b):
+        key = (min(a, b), max(a, b))
+        if key in seen:
+            return
+        seen.add(key)
+        clauses.append([a, -b])
+        clauses.append([-a, b])
+
+    if row_period < rows:
+        for r in range(rows):
+            rr = (r + row_period) % rows
+            for c in range(cols):
+                equal(_var(r, c, cols), _var(rr, c, cols))
+    if col_period < cols:
+        for r in range(rows):
+            for c in range(cols):
+                cc = (c + col_period) % cols
+                equal(_var(r, c, cols), _var(r, cc, cols))
+    return clauses
+
+
+def build_hard_clauses(rows, cols, k, grid, locks, repeat=None):
     """构造硬约束子句。
 
     - 行约束：对每行、每个环向起点，长度 L = min(K+1, cols) 的窗口
@@ -27,6 +61,7 @@ def build_hard_clauses(rows, cols, k, grid, locks):
       "全同行视为无限浮长"。
     - 列约束：同理，窗口长度 L = min(K+1, rows)。
     - 锁定格：固定为原稿值。
+    - 重复周期（可选）：修补稿按行/列周期环绕重复。
     """
     clauses = []
 
@@ -58,6 +93,7 @@ def build_hard_clauses(rows, cols, k, grid, locks):
         v = _var(r, c, cols)
         clauses.append([v if grid[r][c] == 1 else -v])
 
+    clauses.extend(_repeat_clauses(rows, cols, repeat))
     return clauses
 
 
@@ -189,10 +225,13 @@ def _enumerate_lex(clauses, rows, cols, locked, limit):
     return results
 
 
-def solve_repair_top(rows, cols, k, grid, locks, ones_range=None, limit=3):
+def solve_repair_top(rows, cols, k, grid, locks, ones_range=None,
+                     repeat=None, limit=3):
     """求全局最少翻转的前 limit 个并列最优修补（按行展开字典序升序）。
 
     ones_range 给出修补稿格值 1 总数区间 (下限, 上限)，None 表示不限制。
+    repeat 给出修补稿的 (行周期, 列周期)，None 表示不限制；启用后每个
+    候选都按该周期环绕重复，翻转数仍按实际改变的格数计算。
     返回 None 表示无可行修补；否则返回
     {
         "flip_count": 全局最少翻转数,
@@ -204,8 +243,9 @@ def solve_repair_top(rows, cols, k, grid, locks, ones_range=None, limit=3):
     }
     candidates[0] 即旧版 solve_repair 的结果（字典序最小）。
     """
-    hard = build_hard_clauses(rows, cols, k, grid, locks)
-    # 格值 1 总数区间与浮长、锁定同为硬约束；辅助变量从格变量之后开始编号
+    hard = build_hard_clauses(rows, cols, k, grid, locks, repeat)
+    # 格值 1 总数区间与浮长、锁定、重复周期同为硬约束；
+    # 辅助变量从格变量之后开始编号
     range_clauses, next_free = _ones_range_clauses(
         rows, cols, ones_range, rows * cols + 1)
     hard.extend(range_clauses)
@@ -304,10 +344,12 @@ def _enumerate_unlock_sets(clauses, unlock_vars, best, limit, next_free):
     return results
 
 
-def diagnose_unlocks(rows, cols, k, grid, locks, ones_range=None, limit=3):
+def diagnose_unlocks(rows, cols, k, grid, locks, ones_range=None,
+                     repeat=None, limit=3):
     """无解草稿诊断：求使修补可行所需解除的锁定格数量全局最少的方案。
 
-    保持尺寸、格值、K 与可选 onesRange 不变，只允许解除部分锁定格。
+    保持尺寸、格值、K、可选 onesRange 与可选 repeat 不变，只允许解除
+    部分锁定格。
     - 全部锁定格均解除仍无解（结构性无解）时返回
       {"structural": True}，不提供任何解锁建议；
     - 否则返回
@@ -319,13 +361,14 @@ def diagnose_unlocks(rows, cols, k, grid, locks, ones_range=None, limit=3):
        ]}。
     每份 example 是在“仅解除该集合、其余锁定格不变”的约束下
     全局翻转数最少（并列再按行展开字典序最小）的可行修补示例，
-    因此未解锁的锁定格绝不改变，且示例满足环向浮长 K 与 onesRange。
+    因此未解锁的锁定格绝不改变，且示例满足环向浮长 K、onesRange
+    与重复周期 repeat。
     """
     locked = sorted(map(tuple, locks))
 
     # 快速路径：草稿在现有锁定下已可行 -> 无需解除任何锁定格
     current = solve_repair_top(rows, cols, k, grid, locks, ones_range,
-                               limit=1)
+                               repeat, limit=1)
     if current is not None:
         return {
             "structural": False,
@@ -337,7 +380,8 @@ def diagnose_unlocks(rows, cols, k, grid, locks, ones_range=None, limit=3):
         }
 
     # 结构性检验：解除全部锁定后是否还存在可行网格
-    if solve_repair_top(rows, cols, k, grid, [], ones_range, limit=1) is None:
+    if solve_repair_top(rows, cols, k, grid, [], ones_range, repeat,
+                        limit=1) is None:
         return {"structural": True}
 
     if not locked:
@@ -350,7 +394,7 @@ def diagnose_unlocks(rows, cols, k, grid, locks, ones_range=None, limit=3):
     unlock_vars = [cell_base + 1 + i for i in range(len(locked))]
     next_free = cell_base + len(locked) + 1
     hard = []
-    hard.extend(build_hard_clauses(rows, cols, k, grid, []))
+    hard.extend(build_hard_clauses(rows, cols, k, grid, [], repeat))
     range_clauses, next_free = _ones_range_clauses(
         rows, cols, ones_range, next_free)
     hard.extend(range_clauses)
@@ -381,7 +425,7 @@ def diagnose_unlocks(rows, cols, k, grid, locks, ones_range=None, limit=3):
         unlocks = sorted(unlock_by_var[lit] for lit in chosen)
         remaining = [pos for pos in locked if pos not in set(unlocks)]
         solved = solve_repair_top(rows, cols, k, grid, remaining,
-                                  ones_range, limit=1)
+                                  ones_range, repeat, limit=1)
         assert solved is not None, "枚举到的解锁集合必须使修补可行"
         first = solved["candidates"][0]
         options.append({
@@ -391,17 +435,19 @@ def diagnose_unlocks(rows, cols, k, grid, locks, ones_range=None, limit=3):
     return {"structural": False, "unlock_count": best, "options": options}
 
 
-def solve_repair(rows, cols, k, grid, locks, ones_range=None):
+def solve_repair(rows, cols, k, grid, locks, ones_range=None, repeat=None):
     """求字典序最小的最优修补（solve_repair_top 的单候选便捷封装）。
 
     ones_range 给出修补稿格值 1 总数区间 (下限, 上限)，None 表示不限制。
+    repeat 给出修补稿的 (行周期, 列周期)，None 表示不限制。
     返回 None 表示无可行修补；否则返回 dict：
     {
         "repaired": 修补后的二维格值,
         "flips":    [[r, c], ...] 被翻转的格（按行展开序）,
     }
     """
-    solved = solve_repair_top(rows, cols, k, grid, locks, ones_range, limit=1)
+    solved = solve_repair_top(rows, cols, k, grid, locks, ones_range,
+                              repeat, limit=1)
     if solved is None:
         return None
     first = solved["candidates"][0]

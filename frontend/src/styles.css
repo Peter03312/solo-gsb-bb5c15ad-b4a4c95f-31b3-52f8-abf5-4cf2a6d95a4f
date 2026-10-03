@@ -57,6 +57,8 @@ header h1 { margin: 0.2rem 0; font-size: 1.5rem; }
 
 .range-field { flex-wrap: wrap; }
 .range-field input { width: 4.2rem; }
+.repeat-field { flex-wrap: wrap; }
+.repeat-field input { width: 4.2rem; }
 .range-sep { color: #7a8197; }
 .range-total { color: #8a90a3; font-size: 0.8rem; }
 .count-line strong { color: var(--ink); }

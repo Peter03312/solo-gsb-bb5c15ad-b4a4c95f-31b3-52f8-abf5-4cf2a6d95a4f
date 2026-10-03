@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS design (
     locks      TEXT NOT NULL,
     k          INTEGER NOT NULL,
     ones_range TEXT,
+    repeat_p   TEXT,
     version    INTEGER NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -32,7 +33,7 @@ CREATE TABLE IF NOT EXISTS preview (
 );
 """
 
-# 默认原稿：4x4 交错平纹，无锁定，K=2，不指定格值1总数区间
+# 默认原稿：4x4 交错平纹，无锁定，K=2，不指定格值1总数区间与重复周期
 DEFAULT_DESIGN = {
     "rows": 4,
     "cols": 4,
@@ -43,6 +44,7 @@ DEFAULT_DESIGN = {
     "locks": [],
     "k": 2,
     "onesRange": None,
+    "repeat": None,
 }
 
 # 确认失败的原子结果：(设计稿, None) 成功；(None, 原因) 冲突
@@ -91,18 +93,23 @@ class Database:
             dcols = {r["name"] for r in conn.execute("PRAGMA table_info(design)")}
             if "ones_range" not in dcols:
                 conn.execute("ALTER TABLE design ADD COLUMN ones_range TEXT")
+            # 旧库迁移：原稿补齐重复周期列（旧稿无周期，置 NULL）
+            if "repeat_p" not in dcols:
+                conn.execute("ALTER TABLE design ADD COLUMN repeat_p TEXT")
             row = conn.execute("SELECT COUNT(*) AS n FROM design").fetchone()
             if row["n"] == 0:
                 conn.execute(
                     "INSERT INTO design (id, rows, cols, grid, locks, k,"
-                    " ones_range, version, updated_at)"
-                    " VALUES (1, ?, ?, ?, ?, ?, ?, 1, ?)",
+                    " ones_range, repeat_p, version, updated_at)"
+                    " VALUES (1, ?, ?, ?, ?, ?, ?, ?, 1, ?)",
                     (DEFAULT_DESIGN["rows"], DEFAULT_DESIGN["cols"],
                      json.dumps(DEFAULT_DESIGN["grid"]),
                      json.dumps(DEFAULT_DESIGN["locks"]),
                      DEFAULT_DESIGN["k"],
                      None if DEFAULT_DESIGN["onesRange"] is None
                      else json.dumps(DEFAULT_DESIGN["onesRange"]),
+                     None if DEFAULT_DESIGN["repeat"] is None
+                     else json.dumps(DEFAULT_DESIGN["repeat"]),
                      _now()),
                 )
 
@@ -110,6 +117,10 @@ class Database:
     def _row_to_design(row):
         raw_range = row["ones_range"]
         ones_range = None if raw_range is None else json.loads(raw_range)
+        keys = row.keys()
+        repeat = (json.loads(row["repeat_p"])
+                  if "repeat_p" in keys and row["repeat_p"] is not None
+                  else None)
         return {
             "rows": row["rows"],
             "cols": row["cols"],
@@ -117,6 +128,7 @@ class Database:
             "locks": json.loads(row["locks"]),
             "k": row["k"],
             "onesRange": ones_range,
+            "repeat": repeat,
             "version": row["version"],
         }
 
@@ -190,14 +202,16 @@ class Database:
                 rows, cols, locks, k = (
                     input_obj["rows"], input_obj["cols"],
                     input_obj["locks"], input_obj["k"])
-                # 旧版预览（规范化文本中无 onesRange）按未填区间处理
+                # 旧版预览（规范化文本中无 onesRange/repeat）按未填处理
                 ones_range = input_obj.get("onesRange")
+                repeat = input_obj.get("repeat")
                 conn.execute(
                     "UPDATE design SET rows = ?, cols = ?, grid = ?, locks = ?,"
-                    " k = ?, ones_range = ?, version = version + 1,"
-                    " updated_at = ? WHERE id = 1",
+                    " k = ?, ones_range = ?, repeat_p = ?,"
+                    " version = version + 1, updated_at = ? WHERE id = 1",
                     (rows, cols, json.dumps(grid), json.dumps(locks),
                      k, None if ones_range is None else json.dumps(ones_range),
+                     None if repeat is None else json.dumps(repeat),
                      _now()),
                 )
                 # 仅在条件全部满足时消费令牌；UPDATE 后删除，行锁持有到提交

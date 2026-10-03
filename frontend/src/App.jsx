@@ -14,6 +14,7 @@ function cloneDesign(d) {
     grid: d.grid.map((row) => [...row]),
     locks: d.locks.map((p) => [...p]),
     onesRange: Array.isArray(d.onesRange) ? [...d.onesRange] : null,
+    repeat: Array.isArray(d.repeat) ? [...d.repeat] : null,
   };
 }
 
@@ -32,10 +33,18 @@ function sameRange(a, b) {
   return a[0] === b[0] && a[1] === b[1];
 }
 
+/** 重复周期是否一致（同缺省或行/列周期相同）。 */
+function sameRepeat(a, b) {
+  if (a == null && b == null) return true;
+  if (a == null || b == null) return false;
+  return a[0] === b[0] && a[1] === b[1];
+}
+
 function sameDesign(a, b) {
   if (!a || !b) return false;
   if (a.rows !== b.rows || a.cols !== b.cols || a.k !== b.k) return false;
   if (!sameRange(a.onesRange, b.onesRange)) return false;
+  if (!sameRepeat(a.repeat, b.repeat)) return false;
   for (let r = 0; r < a.rows; r += 1) {
     for (let c = 0; c < a.cols; c += 1) {
       if (a.grid[r][c] !== b.grid[r][c]) return false;
@@ -64,6 +73,18 @@ function validateDraft(d) {
     if (lo > hi) return "格值1总数区间下限不得大于上限";
     if (hi > total) {
       return `格值1总数区间上限 ${hi} 超出当前尺寸总格数 ${total}（${d.rows}×${d.cols}），请调整区间或尺寸，不会自动截断`;
+    }
+  }
+  if (d.repeat != null) {
+    const [rp, cp] = d.repeat;
+    if (!Number.isInteger(rp) || !Number.isInteger(cp) || rp < 1 || cp < 1) {
+      return "重复周期两端都必须是正整数（或两栏留空表示不限制）";
+    }
+    if (rp > d.rows) {
+      return `行周期 ${rp} 超出当前行数 ${d.rows}（${d.rows}×${d.cols}），请调整周期或尺寸，不会自动截断`;
+    }
+    if (cp > d.cols) {
+      return `列周期 ${cp} 超出当前列数 ${d.cols}（${d.rows}×${d.cols}），请调整周期或尺寸，不会自动截断`;
     }
   }
   return null;
@@ -166,6 +187,68 @@ function RangeField({ value, total, onChange, onInvalid }) {
   );
 }
 
+/**
+ * 重复周期 [行周期, 列周期]。两栏皆空表示不填（null，不限制）；
+ * 任一栏有值即视为填写，两端都必须是 1..行数 / 1..列数 内的正整数。
+ * 尺寸变化使周期越界只提示、不截断，由调用方在尺寸变化后给出错误横幅。
+ */
+function RepeatField({ value, rows, cols, onChange, onInvalid }) {
+  const [rpText, setRpText] = useState(value ? String(value[0]) : "");
+  const [cpText, setCpText] = useState(value ? String(value[1]) : "");
+  useEffect(() => {
+    setRpText(value ? String(value[0]) : "");
+    setCpText(value ? String(value[1]) : "");
+  }, [value]);
+
+  function commit() {
+    if (rpText.trim() === "" && cpText.trim() === "") {
+      onChange(null);
+      return;
+    }
+    const rp = Number(rpText);
+    const cp = Number(cpText);
+    if (!Number.isInteger(rp) || !Number.isInteger(cp)
+        || rp < 1 || cp < 1 || rp > rows || cp > cols) {
+      // 还原为当前生效值并提示，不悄悄截断
+      setRpText(value ? String(value[0]) : "");
+      setCpText(value ? String(value[1]) : "");
+      onInvalid();
+      return;
+    }
+    onChange([rp, cp]);
+  }
+
+  return (
+    <label className="field repeat-field">
+      <span>重复周期</span>
+      <input
+        type="number"
+        value={rpText}
+        min={1}
+        max={rows}
+        placeholder="行周期"
+        aria-label="行周期（留空表示不限制）"
+        onChange={(e) => setRpText(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => { if (e.key === "Enter") e.target.blur(); }}
+      />
+      <span className="range-sep">×</span>
+      <input
+        type="number"
+        value={cpText}
+        min={1}
+        max={cols}
+        placeholder="列周期"
+        aria-label="列周期（留空表示不限制）"
+        onChange={(e) => setCpText(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => { if (e.key === "Enter") e.target.blur(); }}
+      />
+      <span className="range-total">当前 {rows} 行 × {cols} 列；两栏留空=不限制</span>
+    </label>
+  );
+}
+
 /** 织物组织网格。markOf(r, c, key) 返回附加样式名（violation / flipped）。 */
 function WeaveGrid({ grid, lockSet, markOf, onCellClick, small }) {
   const cols = grid[0]?.length ?? 0;
@@ -248,11 +331,16 @@ export default function App() {
   const rangeOutOfBounds = Boolean(
     draft?.onesRange && draft.onesRange[1] > draftTotalCells,
   );
+  const repeatOutOfBounds = Boolean(
+    draft?.repeat
+      && (draft.repeat[0] > draft.rows || draft.repeat[1] > draft.cols),
+  );
+  const invalidDraft = rangeOutOfBounds || repeatOutOfBounds;
 
   const previewStale = Boolean(preview && draft && !sameDesign(draft, preview.input));
   const dirty = Boolean(original && draft && !sameDesign(draft, original));
   const canConfirm = Boolean(
-    preview && preview.solvable && !previewStale && !busy && !rangeOutOfBounds);
+    preview && preview.solvable && !previewStale && !busy && !invalidDraft);
 
   // 候选列表：新预览带 candidates（至多 3 个同样最优方案），
   // 旧响应/单候选时退化为仅首个方案。selected 为当前查看并将用于确认的方案。
@@ -309,12 +397,19 @@ export default function App() {
   }
 
   function handleResize(rows, cols) {
-    // 尺寸变化后区间越界：保留原值并提示调整，绝不悄然截断
+    // 尺寸变化后区间/周期越界：保留原值并提示调整，绝不悄然截断
     if (draft.onesRange && draft.onesRange[1] > rows * cols) {
       const [lo, hi] = draft.onesRange;
       setMessage({
         type: "error",
         text: `格值1总数区间 [${lo}, ${hi}] 已超出新尺寸总格数 ${rows * cols}（${rows}×${cols}），请调整区间（原区间未被截断）`,
+      });
+    }
+    if (draft.repeat && (draft.repeat[0] > rows || draft.repeat[1] > cols)) {
+      const [rp, cp] = draft.repeat;
+      setMessage({
+        type: "error",
+        text: `重复周期 [${rp}, ${cp}] 已超出新尺寸 ${rows} 行 × ${cols} 列，请调整周期或尺寸（原周期未被截断）`,
       });
     }
     setDraft((d) => {
@@ -335,6 +430,18 @@ export default function App() {
       });
     } else {
       setMessage({ type: "info", text: "已清空格值1总数区间，预览沿用原有修补规则（不限制 1 的总数）。" });
+    }
+  }
+
+  function handleRepeatChange(next) {
+    setDraft((d) => ({ ...d, repeat: next }));
+    if (next) {
+      setMessage({
+        type: "info",
+        text: `已设置重复周期 [行周期 ${next[0]}, 列周期 ${next[1]}]，修补稿每格将与下移 ${next[0]} 行、右移 ${next[1]} 列（索引环绕）后的格值相同。`,
+      });
+    } else {
+      setMessage({ type: "info", text: "已清空重复周期，修补稿不再要求按周期重复。" });
     }
   }
 
@@ -359,12 +466,15 @@ export default function App() {
       const rangeText = result.onesRange
         ? `，格值1总数须在 [${result.onesRange[0]}, ${result.onesRange[1]}] 内`
         : "";
+      const repeatText = result.repeat
+        ? `，修补稿按行周期 ${result.repeat[0]}、列周期 ${result.repeat[1]} 重复`
+        : "";
       const tieText = result.solvable && result.candidateCount > 1
         ? `，并列出前 ${result.candidateCount} 个同样最优方案可逐个比较`
         : "";
       setMessage(result.solvable
-        ? { type: "success", text: `预览成功：最少翻转 ${result.flipCount} 格${rangeText}${tieText}，确认后覆盖原稿。` }
-        : { type: "info", text: "无可行修补：在锁定格、浮长与格值1总数区间约束下找不到达标稿件，已保留原稿，请调整后重试。" });
+        ? { type: "success", text: `预览成功：最少翻转 ${result.flipCount} 格${rangeText}${repeatText}${tieText}，确认后覆盖原稿。` }
+        : { type: "info", text: "无可行修补：在锁定格、浮长、重复周期与格值1总数区间约束下找不到达标稿件，已保留原稿，请调整后重试。" });
     } catch (e) {
       setPreview(null);
       setCandidateIndex(0);
@@ -392,7 +502,10 @@ export default function App() {
             + (result.onesRange
               ? ` 与格值1总数区间 [${result.onesRange[0]}, ${result.onesRange[1]}]`
               : "")
-            + " 下仍不存在达标稿件，请调整尺寸、格值、K 或区间，解锁无济于事。",
+            + (result.repeat
+              ? `、重复周期 [${result.repeat[0]}, ${result.repeat[1]}]`
+              : "")
+            + " 下仍不存在达标稿件，请调整尺寸、格值、K、区间或周期，解锁无济于事。",
         });
       } else if (result.unlockCount === 0) {
         setMessage({
@@ -526,6 +639,17 @@ export default function App() {
           })}
         />
 
+        <RepeatField
+          value={draft.repeat}
+          rows={draft.rows}
+          cols={draft.cols}
+          onChange={handleRepeatChange}
+          onInvalid={() => setMessage({
+            type: "error",
+            text: `重复周期须两端同时填写正整数，且 1 ≤ 行周期 ≤ ${draft.rows}、1 ≤ 列周期 ≤ ${draft.cols}；两栏都留空才表示不限制（已还原，未截断）`,
+          })}
+        />
+
         <div className="mode-switch" role="group" aria-label="编辑模式">
           <button
             type="button"
@@ -550,7 +674,7 @@ export default function App() {
           <button
             type="button"
             className="diagnose"
-            disabled={busy || rangeOutOfBounds}
+            disabled={busy || invalidDraft}
             onClick={handleDiagnose}
             title="预览显示无可行修补时使用：区分锁定阻碍与结构性无解，并给出最少解锁建议"
           >
@@ -600,6 +724,15 @@ export default function App() {
                 </>
               : " · 未设置格值1总数区间"}
           </p>
+          <p className={`meta count-line${repeatOutOfBounds ? " out-of-range" : ""}`}>
+            {draft.repeat
+              ? <>重复周期：<strong>行 {draft.repeat[0]} × 列 {draft.repeat[1]}</strong>
+                  {repeatOutOfBounds
+                    ? " · ⚠ 周期已越界，请调整周期或尺寸后再预览（不会自动截断）"
+                    : " · 修补稿须按该周期环绕重复"}
+                </>
+              : "重复周期：未设置（不限制）"}
+          </p>
           <h3>超限段（{draftViolations.length}）</h3>
           <ViolationList violations={draftViolations} k={draft.k} />
         </section>
@@ -619,6 +752,11 @@ export default function App() {
                 ? <> · 区间 <strong>[{original.onesRange[0]}, {original.onesRange[1]}]</strong></>
                 : " · 区间：未设置"}
             </p>
+            <p className="meta">
+              {Array.isArray(original.repeat)
+                ? <>重复周期：<strong>行 {original.repeat[0]} × 列 {original.repeat[1]}</strong></>
+                : "重复周期：未设置"}
+            </p>
             <ViolationList violations={original.violations} k={original.k} />
           </section>
 
@@ -627,7 +765,7 @@ export default function App() {
               <h2>修补预览 {previewStale && <span className="stale-tag">已失效</span>}</h2>
               {previewStale && (
                 <p className="warn-text">
-                  预览后草稿（交织格、锁定格、K 或格值1总数区间）已变动，旧预览失效，请重新预览。
+                  预览后草稿（交织格、锁定格、K、重复周期或格值1总数区间）已变动，旧预览失效，请重新预览。
                 </p>
               )}
               {preview.solvable && selected ? (
@@ -683,7 +821,10 @@ export default function App() {
                 </>
               ) : preview.solvable ? null : (
                 <p className="warn-text">
-                  无可行修补：在锁定格、环向浮长 K
+                  无可行修补：在锁定格、环向浮长 K、重复周期
+                  {preview.repeat
+                    ? ` [行 ${preview.repeat[0]}, 列 ${preview.repeat[1]}]`
+                    : ""}
                   {preview.onesRange
                     ? ` 与格值1总数区间 [${preview.onesRange[0]}, ${preview.onesRange[1]}]`
                     : ""}
@@ -700,7 +841,7 @@ export default function App() {
               </h2>
               {diagnosisStale && (
                 <p className="warn-text">
-                  诊断后草稿（尺寸、交织格、锁定格、K 或格值1总数区间）已变化，
+                  诊断后草稿（尺寸、交织格、锁定格、K、重复周期或格值1总数区间）已变化，
                   旧的解锁建议不得沿用，请重新诊断。
                 </p>
               )}
@@ -710,7 +851,10 @@ export default function App() {
                   {diagnosis.onesRange
                     ? ` 与格值1总数区间 [${diagnosis.onesRange[0]}, ${diagnosis.onesRange[1]}]`
                     : ""}
-                  的共同约束下仍不存在达标稿件。请调整尺寸、格值、K 或区间，
+                  {diagnosis.repeat
+                    ? `、重复周期 [行 ${diagnosis.repeat[0]}, 列 ${diagnosis.repeat[1]}]`
+                    : ""}
+                  的共同约束下仍不存在达标稿件。请调整尺寸、格值、K、区间或周期，
                   解除锁定无济于事。
                 </p>
               ) : diagnosis.unlockCount === 0 ? (
@@ -724,9 +868,12 @@ export default function App() {
                     {diagnosis.onesRange
                       ? ` 与区间 [${diagnosis.onesRange[0]}, ${diagnosis.onesRange[1]}]`
                       : ""}
+                    {diagnosis.repeat
+                      ? `、重复周期 [行 ${diagnosis.repeat[0]}, 列 ${diagnosis.repeat[1]}]`
+                      : ""}
                     不变，全局最少需解除 <strong>{diagnosis.unlockCount}</strong> 个锁定格。
                     以下为按坐标列表字典序排列的前 {diagOptions.length} 个互异解锁集合，
-                    各附一份满足环向浮长与总数区间的可行修补示例；示例中未解锁的锁定格均未改变。
+                    各附一份满足环向浮长、重复周期与总数区间的可行修补示例；示例中未解锁的锁定格均未改变。
                   </p>
                   {diagOptions.length > 1 && (
                     <div className="candidate-bar" role="group" aria-label="解锁集合方案">

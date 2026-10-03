@@ -14,10 +14,12 @@ def _is_int(v):
 
 
 def validate_design(payload):
-    """校验并规范化设计稿，返回 (rows, cols, grid, locks, k, ones_range)。
+    """校验并规范化设计稿，返回 (rows, cols, grid, locks, k, ones_range, repeat)。
 
     ones_range 为 None（未填写区间）或 (下限, 上限)：填写时两端都必填，
     且满足 0 <= 下限 <= 上限 <= 行数×列数。
+    repeat 为 None（不限制）或 (行周期, 列周期)：填写时两端都必填，
+    且为 1 <= 行周期 <= 行数、1 <= 列周期 <= 列数 的正整数。
     不合法时抛出 ValidationError。
     """
     if not isinstance(payload, dict):
@@ -79,12 +81,37 @@ def validate_design(payload):
             "格值1总数区间须为 [下限, 上限]，填写时两端都必填"
             "（0 ≤ 下限 ≤ 上限 ≤ 行数×列数）；不填时请传 null 或省略")
 
+    # 重复周期：省略或 null 表示不限制；填写时必须是 [行周期, 列周期]
+    # 两元素数组，两端都必填，且为不超过当前行/列数的正整数。
+    # 尺寸变化导致周期越界只提示调整，绝不悄悄截断。
+    raw_repeat = payload.get("repeat", None)
+    if raw_repeat is None:
+        repeat = None
+    elif (isinstance(raw_repeat, list) and len(raw_repeat) == 2
+          and _is_int(raw_repeat[0]) and _is_int(raw_repeat[1])):
+        row_period, col_period = raw_repeat
+        if row_period < 1 or col_period < 1:
+            raise ValidationError("重复周期必须是正整数（行周期、列周期均 ≥ 1）")
+        if row_period > rows:
+            raise ValidationError(
+                f"行周期 {row_period} 超出当前行数 {rows}"
+                f"（{rows}×{cols}），请调整周期或尺寸，不会自动截断")
+        if col_period > cols:
+            raise ValidationError(
+                f"列周期 {col_period} 超出当前列数 {cols}"
+                f"（{rows}×{cols}），请调整周期或尺寸，不会自动截断")
+        repeat = (row_period, col_period)
+    else:
+        raise ValidationError(
+            "重复周期须为 [行周期, 列周期]，填写时两端都必填"
+            "（1 ≤ 行周期 ≤ 行数、1 ≤ 列周期 ≤ 列数）；不填时请传 null 或省略")
+
     grid = [[int(v) for v in row] for row in grid]
     locks = sorted(norm_locks)
-    return rows, cols, grid, locks, k, ones_range
+    return rows, cols, grid, locks, k, ones_range, repeat
 
 
-def canonical(rows, cols, grid, locks, k, ones_range=None):
+def canonical(rows, cols, grid, locks, k, ones_range=None, repeat=None):
     """规范化后的可哈希表示，用于预览一致性比对。"""
     return {
         "rows": rows,
@@ -94,4 +121,6 @@ def canonical(rows, cols, grid, locks, k, ones_range=None):
         "k": k,
         "onesRange": None if ones_range is None
         else [ones_range[0], ones_range[1]],
+        "repeat": None if repeat is None
+        else [repeat[0], repeat[1]],
     }
